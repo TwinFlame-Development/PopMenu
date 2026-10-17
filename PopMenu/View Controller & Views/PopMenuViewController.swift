@@ -448,7 +448,15 @@ extension PopMenuViewController {
     ///
     /// - Returns: The source origin point
     fileprivate func calculateContentOrigin(with size: CGSize) -> CGPoint {
-        guard let sourceFrame = absoluteSourceFrame else { return CGPoint(x: view.bounds.midX - size.width / 2, y: view.bounds.midY - size.height / 2) }
+        guard let sourceFrame = absoluteSourceFrame else {
+            // No source view (none given, or not on screen): centred in the space the menu may use,
+            // which its height was fitted to.
+            let area = layoutArea
+            var origin = CGPoint(x: area.midX - size.width / 2, y: area.midY - size.height / 2)
+            origin.y = min(origin.y, area.maxY - edgeMargin - size.height)
+            origin.y = max(origin.y, area.minY + edgeMargin)
+            return origin
+        }
         // The menu may always reach as far as its source view, even where the source sits outside
         // the safe area (a bar button beside a camera housing, for example).
         let safe = layoutArea

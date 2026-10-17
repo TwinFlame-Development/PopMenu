@@ -250,6 +250,26 @@ class PopMenuTests: XCTestCase {
         assertEveryActionReachable(scene, actions: 9)
     }
 
+    /// With no anchor and an uneven safe area, the menu is centred in the safe area and stays inside
+    /// it, for a long menu and a short one, before and after the safe area changes.
+    func testNoAnchorStaysInsideAnUnevenSafeArea() {
+        for actions in [9, 4] {
+            let scene = Scene(size: CGSize(width: 669, height: 600), anchored: false, actions: actions)
+            for insets in [UIEdgeInsets(top: 40, left: 0, bottom: 414, right: 0), UIEdgeInsets(top: 300, left: 60, bottom: 20, right: 0)] {
+                scene.menu.additionalSafeAreaInsets = insets
+                scene.menu.view.setNeedsLayout()
+                scene.menu.view.layoutIfNeeded()
+                let b = scene.menu.view.bounds, i = scene.menu.view.safeAreaInsets
+                let safe = CGRect(x: b.minX + i.left, y: b.minY + i.top, width: b.width - i.left - i.right, height: b.height - i.top - i.bottom)
+                let frame = scene.menuFrame
+                XCTAssertGreaterThanOrEqual(frame.minY, safe.minY - 0.5, "\(actions) actions, \(insets): \(frame)")
+                XCTAssertLessThanOrEqual(frame.maxY, safe.maxY + 0.5, "\(actions) actions, \(insets): \(frame)")
+                XCTAssertEqual(frame.midX, safe.midX, accuracy: 0.5, "centred across the safe area")
+                assertEveryActionReachable(scene, actions: actions)
+            }
+        }
+    }
+
     /// With no anchor the menu is centred in its view, before and after a resize.
     func testNoAnchorCentresTheMenu() {
         let scene = Scene(size: CGSize(width: 669, height: 951), anchored: false)
