@@ -29,7 +29,7 @@ final public class PopMenuDismissAnimationController: NSObject, UIViewController
         
         let containerView = transitionContext.containerView
         let view = menuViewController.view!
-        view.frame = containerView.frame
+        view.frame = containerView.bounds
         containerView.addSubview(view)
         
         let animationDuration = transitionDuration(using: transitionContext)

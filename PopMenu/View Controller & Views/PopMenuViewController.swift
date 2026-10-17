@@ -50,7 +50,8 @@ final public class PopMenuViewController: UIViewController {
     /// The source View to be displayed from.
     private(set) weak var sourceView: AnyObject?
     
-    /// The absolute source frame relative to screen.
+    /// The source view's frame in this menu's view, read again each time the menu is laid out
+    /// (`layoutMenu()`). Until the menu is on screen it is the frame in the source view's window.
     private(set) var absoluteSourceFrame: CGRect?
     
     /// The calculated content frame.
@@ -79,8 +80,9 @@ final public class PopMenuViewController: UIViewController {
     private(set) var contentWidthConstraint: NSLayoutConstraint!
     private(set) var contentHeightConstraint: NSLayoutConstraint!
     
-    /// The UIView instance of source view.
-    fileprivate lazy var sourceViewAsUIView: UIView? = {
+    /// The UIView instance of source view. Looked up each time: the system may move a bar button
+    /// item's view, or replace it, while the menu is open.
+    fileprivate var sourceViewAsUIView: UIView? {
         guard let sourceView = sourceView else { return nil }
         
         // Check if UIBarButtonItem
@@ -95,7 +97,10 @@ final public class PopMenuViewController: UIViewController {
         }
         
         return nil
-    }()
+    }
+    
+    /// The view size the menu was last laid out for; nil until it is presented.
+    fileprivate var laidOutSize: CGSize?
     
     /// Tap gesture to dismiss for background view.
     fileprivate lazy var tapGestureForDismissal: UITapGestureRecognizer = {
@@ -117,8 +122,20 @@ final public class PopMenuViewController: UIViewController {
     /// Actions of menu.
     public private(set) var actions: [PopMenuAction] = []
     
-    /// Max content width allowed for the content to stretch to.
-    fileprivate let maxContentWidth: CGFloat = UIScreen.main.bounds.size.width * 0.9
+    /// Max content width allowed for the content to stretch to: 90% of the area the menu may use.
+    fileprivate var maxContentWidth: CGFloat {
+        return layoutArea.width * 0.9
+    }
+    
+    /// Where the menu may go: this view's bounds less its safe area. The menu is sized and placed
+    /// from the view it is presented in, never from the device's screen, which can differ from it
+    /// (a foldable's other display, an iPad window, Split View).
+    fileprivate var layoutArea: CGRect {
+        if #available(iOS 11.0, *) {
+            return view.bounds.inset(by: view.safeAreaInsets)
+        }
+        return view.bounds
+    }
     
     // MARK: - View Life Cycle
     
@@ -157,11 +174,30 @@ final public class PopMenuViewController: UIViewController {
         configureActionsView()
     }
     
-    /// Set absolute source frame relative to screen frame.
+    /// Set the source frame: in this menu's view once the menu is on screen, and in the source view's
+    /// window before that. With no source view on screen there is none, and the menu is centred.
     fileprivate func setAbsoluteSourceFrame() {
-        if let sourceView = sourceViewAsUIView {
+        guard let sourceView = sourceViewAsUIView, sourceView.window != nil || !isViewLoaded else {
+            absoluteSourceFrame = nil
+            return
+        }
+        if isViewLoaded, view.window != nil {
+            absoluteSourceFrame = sourceView.convert(sourceView.bounds, to: view)
+        } else {
             absoluteSourceFrame = sourceView.convert(sourceView.bounds, to: nil)
         }
+    }
+    
+    /// Lay the menu out for its view as it is now: read the source view's frame again, fit the menu
+    /// to this view, and update the constraints' constants (they are made once, in `loadView()`).
+    func layoutMenu() {
+        setAbsoluteSourceFrame()
+        contentFrame = calculateContentFittingFrame()
+        contentLeftConstraint.constant = contentFrame.origin.x
+        contentTopConstraint.constant = contentFrame.origin.y
+        contentWidthConstraint.constant = contentFrame.size.width
+        contentHeightConstraint.constant = contentFrame.size.height
+        laidOutSize = view.bounds.size
     }
     
     /// Add a new action to the menu.
@@ -210,12 +246,23 @@ final public class PopMenuViewController: UIViewController {
     ///   - coordinator: Coordinator that manages the container
     public override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         coordinator.animate(alongsideTransition: { context in
-            self.configureBackgroundView()
-            self.contentFrame = self.calculateContentFittingFrame()
-            self.setupContentConstraints()
+            self.layoutMenu()
+            self.view.layoutIfNeeded()
+        }, completion: { context in
+            // The source view may only reach its new place once the transition has finished.
+            self.layoutMenu()
+            self.view.layoutIfNeeded()
         })
         
         super.viewWillTransition(to: size, with: coordinator)
+    }
+    
+    /// A size change that comes without a transition coordinator is laid out here too.
+    public override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if let size = laidOutSize, size != view.bounds.size {
+            layoutMenu()
+        }
     }
     
 }
@@ -224,9 +271,9 @@ final public class PopMenuViewController: UIViewController {
 
 extension PopMenuViewController {
     
-    /// Setup the background view at the bottom.
+    /// Setup the background view at the bottom, once: pinned to this view's edges, so it covers the
+    /// whole view at any size.
     fileprivate func configureBackgroundView() {
-        backgroundView.frame = view.frame
         backgroundView.backgroundColor = .clear
         backgroundView.translatesAutoresizingMaskIntoConstraints = false
         backgroundView.addGestureRecognizer(tapGestureForDismissal)
@@ -240,9 +287,15 @@ extension PopMenuViewController {
             let blurStyle = backgroundStyle.blurStyle {
             
             let blurView = UIVisualEffectView(effect: UIBlurEffect(style: blurStyle))
-            blurView.frame = backgroundView.frame
+            blurView.translatesAutoresizingMaskIntoConstraints = false
             
             backgroundView.addSubview(blurView)
+            NSLayoutConstraint.activate([
+                blurView.leftAnchor.constraint(equalTo: backgroundView.leftAnchor),
+                blurView.rightAnchor.constraint(equalTo: backgroundView.rightAnchor),
+                blurView.topAnchor.constraint(equalTo: backgroundView.topAnchor),
+                blurView.bottomAnchor.constraint(equalTo: backgroundView.bottomAnchor)
+            ])
         }
         
         // Dimmed background
@@ -255,6 +308,12 @@ extension PopMenuViewController {
         }
         
         view.insertSubview(backgroundView, at: 0)
+        NSLayoutConstraint.activate([
+            backgroundView.leftAnchor.constraint(equalTo: view.leftAnchor),
+            backgroundView.rightAnchor.constraint(equalTo: view.rightAnchor),
+            backgroundView.topAnchor.constraint(equalTo: view.topAnchor),
+            backgroundView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
     }
     
     /// Setup the content view.
@@ -293,7 +352,8 @@ extension PopMenuViewController {
         setupContentConstraints()
     }
     
-    /// Activate necessary constraints.
+    /// Activate necessary constraints. Called once; a later layout changes their constants
+    /// (`layoutMenu()`).
     fileprivate func setupContentConstraints() {
         contentLeftConstraint = containerView.leftAnchor.constraint(equalTo: view.leftAnchor, constant: contentFrame.origin.x)
         contentTopConstraint = containerView.topAnchor.constraint(equalTo: view.topAnchor, constant: contentFrame.origin.y)
@@ -347,9 +407,14 @@ extension PopMenuViewController {
     ///
     /// - Returns: The source origin point
     fileprivate func calculateContentOrigin(with size: CGSize) -> CGPoint {
-        guard let sourceFrame = absoluteSourceFrame else { return CGPoint(x: view.center.x - size.width / 2, y: view.center.y - size.height / 2) }
-        let minContentPos: CGFloat = UIScreen.main.bounds.size.width * 0.05
-        let maxContentPos: CGFloat = UIScreen.main.bounds.size.width * 0.95
+        guard let sourceFrame = absoluteSourceFrame else { return CGPoint(x: view.bounds.midX - size.width / 2, y: view.bounds.midY - size.height / 2) }
+        // The menu may always reach as far as its source view, even where the source sits outside
+        // the safe area (a bar button beside a camera housing, for example).
+        let safe = layoutArea
+        let minX = min(safe.minX, sourceFrame.minX), maxX = max(safe.maxX, sourceFrame.maxX)
+        let area = CGRect(x: minX, y: safe.minY, width: maxX - minX, height: safe.height)
+        let minContentPos: CGFloat = area.minX + area.width * 0.05
+        let maxContentPos: CGFloat = area.maxX - area.width * 0.05
         
         // Get desired content origin point
         let offsetX = (size.width - sourceFrame.size.width ) / 2
@@ -376,14 +441,14 @@ extension PopMenuViewController {
     fileprivate func translateOverflowX(desiredOrigin: inout CGPoint, contentSize: CGSize) {
         let edgePadding: CGFloat = 8
         // Check content in left or right side
-        let leftSide = (desiredOrigin.x - view.center.x) < 0
+        let leftSide = (desiredOrigin.x - view.bounds.midX) < 0
         
         // Check view overflow
         let origin = CGPoint(x: leftSide ? desiredOrigin.x : desiredOrigin.x + contentSize.width, y: desiredOrigin.y)
         
         // Move accordingly
-        if !view.frame.contains(origin) {
-            let overflowX: CGFloat = (leftSide ? 1 : -1) * ((leftSide ? view.frame.origin.x : view.frame.origin.x + view.frame.size.width) - origin.x) + edgePadding
+        if !view.bounds.contains(origin) {
+            let overflowX: CGFloat = (leftSide ? 1 : -1) * ((leftSide ? view.bounds.minX : view.bounds.maxX) - origin.x) + edgePadding
             
             desiredOrigin = CGPoint(x: desiredOrigin.x - (leftSide ? -1 : 1) * overflowX, y: origin.y)
         }
@@ -400,14 +465,14 @@ extension PopMenuViewController {
         let origin = CGPoint(x: desiredOrigin.x, y: desiredOrigin.y + contentSize.height)
 
         if #available(iOS 11.0, *) {
-            edgePadding = UIApplication.shared.keyWindow?.safeAreaInsets.bottom ?? 8
+            edgePadding = view.safeAreaInsets.bottom
         } else {
             edgePadding = 8
         }
         
         // Check content inside of view or not
-        if !view.frame.contains(origin) {
-            let overFlowY: CGFloat = origin.y - view.frame.size.height + edgePadding
+        if !view.bounds.contains(origin) {
+            let overFlowY: CGFloat = origin.y - view.bounds.maxY + edgePadding
             
             desiredOrigin = CGPoint(x: desiredOrigin.x, y: desiredOrigin.y - overFlowY)
         }

@@ -29,8 +29,11 @@ final public class PopMenuPresentAnimationController: NSObject, UIViewController
         
         let containerView = transitionContext.containerView
         let view = menuViewController.view!
-        view.frame = containerView.frame
+        view.frame = containerView.bounds
         containerView.addSubview(view)
+        // Now that the menu is in its container, lay it out for it: the source view's frame in the
+        // menu's view, and the menu fitted to that view.
+        menuViewController.layoutMenu()
         
         prepareAnimation(menuViewController)
         
@@ -49,7 +52,7 @@ final public class PopMenuPresentAnimationController: NSObject, UIViewController
         viewController.containerView.alpha = 0
         viewController.backgroundView.alpha = 0
         
-        if let sourceFrame = sourceFrame {
+        if let sourceFrame = viewController.absoluteSourceFrame ?? sourceFrame {
             viewController.contentLeftConstraint.constant = sourceFrame.origin.x
             viewController.contentTopConstraint.constant = sourceFrame.origin.y
             viewController.contentWidthConstraint.constant = sourceFrame.size.width
