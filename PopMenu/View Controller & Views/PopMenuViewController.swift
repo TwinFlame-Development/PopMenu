@@ -47,6 +47,10 @@ final public class PopMenuViewController: UIViewController {
     /// The view contains all the actions.
     public let actionsView = UIStackView()
     
+    /// Holds the actions, so every one of them can be reached when the menu is shorter than they
+    /// are: always for a long menu, and for a short one when its view hasn't room for it.
+    fileprivate let actionsScrollView = UIScrollView()
+    
     /// The source View to be displayed from.
     private(set) weak var sourceView: AnyObject?
     
@@ -99,8 +103,18 @@ final public class PopMenuViewController: UIViewController {
         return nil
     }
     
-    /// The view size the menu was last laid out for; nil until it is presented.
-    fileprivate var laidOutSize: CGSize?
+    /// What the menu was last laid out for: its view's size and safe area, and its source view's
+    /// frame. Nil until it is presented. A change in any of them lays the menu out again.
+    fileprivate var laidOutState: LayoutState?
+    
+    fileprivate struct LayoutState: Equatable {
+        let size: CGSize
+        let safeArea: UIEdgeInsets
+        let sourceFrame: CGRect?
+    }
+    
+    /// Space kept between the menu and the edges of the area it may use.
+    fileprivate let edgeMargin: CGFloat = 8
     
     /// Tap gesture to dismiss for background view.
     fileprivate lazy var tapGestureForDismissal: UITapGestureRecognizer = {
@@ -177,15 +191,28 @@ final public class PopMenuViewController: UIViewController {
     /// Set the source frame: in this menu's view once the menu is on screen, and in the source view's
     /// window before that. With no source view on screen there is none, and the menu is centred.
     fileprivate func setAbsoluteSourceFrame() {
-        guard let sourceView = sourceViewAsUIView, sourceView.window != nil || !isViewLoaded else {
-            absoluteSourceFrame = nil
-            return
-        }
+        absoluteSourceFrame = currentSourceFrame()
+    }
+    
+    /// The source view's frame as it is now (see `setAbsoluteSourceFrame()`).
+    fileprivate func currentSourceFrame() -> CGRect? {
+        guard let sourceView = sourceViewAsUIView, sourceView.window != nil || !isViewLoaded else { return nil }
         if isViewLoaded, view.window != nil {
-            absoluteSourceFrame = sourceView.convert(sourceView.bounds, to: view)
-        } else {
-            absoluteSourceFrame = sourceView.convert(sourceView.bounds, to: nil)
+            return sourceView.convert(sourceView.bounds, to: view)
         }
+        return sourceView.convert(sourceView.bounds, to: nil)
+    }
+    
+    /// What the menu would be laid out for now.
+    fileprivate var currentLayoutState: LayoutState {
+        return LayoutState(size: view.bounds.size, safeArea: safeAreaInsetsOfView, sourceFrame: currentSourceFrame())
+    }
+    
+    fileprivate var safeAreaInsetsOfView: UIEdgeInsets {
+        if #available(iOS 11.0, *) {
+            return view.safeAreaInsets
+        }
+        return .zero
     }
     
     /// Lay the menu out for its view as it is now: read the source view's frame again, fit the menu
@@ -197,7 +224,10 @@ final public class PopMenuViewController: UIViewController {
         contentTopConstraint.constant = contentFrame.origin.y
         contentWidthConstraint.constant = contentFrame.size.width
         contentHeightConstraint.constant = contentFrame.size.height
-        laidOutSize = view.bounds.size
+        // Scroll only when the actions don't all fit; then the pan that highlights them would fight it.
+        actionsScrollView.isScrollEnabled = actionsScrollView.contentSize.height > contentFrame.size.height + 0.5
+        panGestureForMenu.isEnabled = !actionsScrollView.isScrollEnabled
+        laidOutState = currentLayoutState
     }
     
     /// Add a new action to the menu.
@@ -257,12 +287,21 @@ final public class PopMenuViewController: UIViewController {
         super.viewWillTransition(to: size, with: coordinator)
     }
     
-    /// A size change that comes without a transition coordinator is laid out here too.
+    /// A change that comes without a transition coordinator is laid out here too: a new size, a new
+    /// safe area, or a source view that has moved. Not while the menu is being presented or
+    /// dismissed, so those animations run from and to their own frames.
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        if let size = laidOutSize, size != view.bounds.size {
+        guard let laidOut = laidOutState, !isBeingPresented, !isBeingDismissed else { return }
+        if laidOut != currentLayoutState {
             layoutMenu()
         }
+    }
+    
+    @available(iOS 11.0, *)
+    public override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        view.setNeedsLayout()
     }
     
 }
@@ -396,6 +435,8 @@ extension PopMenuViewController {
         } else {
             height = CGFloat(actions.count) * appearance.popMenuActionHeight
         }
+        // Never taller than the space there is: the actions scroll instead (`layoutMenu()`).
+        height = min(height, max(0, verticalArea(for: absoluteSourceFrame).height - edgeMargin * 2))
         
         let size = CGSize(width: calculateContentWidth(), height: height)
         let origin = calculateContentOrigin(with: size)
@@ -430,7 +471,21 @@ extension PopMenuViewController {
         translateOverflowX(desiredOrigin: &desiredOrigin, contentSize: size)
         translateOverflowY(desiredOrigin: &desiredOrigin, contentSize: size)
         
+        // Keep it inside the space it may use, top first: the height already fits it.
+        let vertical = verticalArea(for: sourceFrame)
+        desiredOrigin.y = min(desiredOrigin.y, vertical.maxY - edgeMargin - size.height)
+        desiredOrigin.y = max(desiredOrigin.y, vertical.minY + edgeMargin)
+        
         return desiredOrigin
+    }
+    
+    /// The space the menu may use top to bottom: the safe area, stretched to reach the source view
+    /// where it sits outside it.
+    fileprivate func verticalArea(for sourceFrame: CGRect?) -> CGRect {
+        let safe = layoutArea
+        guard let source = sourceFrame else { return safe }
+        let minY = min(safe.minY, source.minY), maxY = max(safe.maxY, source.maxY)
+        return CGRect(x: safe.minX, y: minY, width: safe.width, height: maxY - minY)
     }
     
     /// Move content into view if it's overflowed in X axis.
@@ -529,43 +584,44 @@ extension PopMenuViewController {
             actionsView.addArrangedSubview(action.view)
         }
         
-        // Check add scroll view or not
+        // The actions sit in a scroll view either way, laid out as before: a long menu scrolls
+        // always; a short one only when its view hasn't room for it (`layoutMenu()`), and keeps the
+        // pan that highlights its actions otherwise.
+        let scrollView = actionsScrollView
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.showsHorizontalScrollIndicator = false
+        scrollView.showsVerticalScrollIndicator = !appearance.popMenuScrollIndicatorHidden
+        scrollView.indicatorStyle = appearance.popMenuScrollIndicatorStyle
+        let actionsHeight = appearance.popMenuActionHeight * CGFloat(actions.count)
+        scrollView.contentSize.height = actionsHeight
+        
+        scrollView.addSubview(actionsView)
+        contentView.addSubview(scrollView)
+        
+        NSLayoutConstraint.activate([
+            scrollView.leftAnchor.constraint(equalTo: contentView.leftAnchor),
+            scrollView.topAnchor.constraint(equalTo: contentView.topAnchor),
+            scrollView.rightAnchor.constraint(equalTo: contentView.rightAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+        ])
+        
         if actions.count >= (appearance.popMenuActionCountForScrollable) {
             // Scrollable actions
-            let scrollView = UIScrollView()
-            scrollView.translatesAutoresizingMaskIntoConstraints = false
-            scrollView.showsHorizontalScrollIndicator = false
-            scrollView.showsVerticalScrollIndicator = !appearance.popMenuScrollIndicatorHidden
-            scrollView.indicatorStyle = appearance.popMenuScrollIndicatorStyle
-            scrollView.contentSize.height = appearance.popMenuActionHeight * CGFloat(actions.count)
-            
-            scrollView.addSubview(actionsView)
-            contentView.addSubview(scrollView)
-            
-            NSLayoutConstraint.activate([
-                scrollView.leftAnchor.constraint(equalTo: contentView.leftAnchor),
-                scrollView.topAnchor.constraint(equalTo: contentView.topAnchor),
-                scrollView.rightAnchor.constraint(equalTo: contentView.rightAnchor),
-                scrollView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
-            ])
-            
             NSLayoutConstraint.activate([
                 actionsView.leftAnchor.constraint(equalTo: contentView.leftAnchor),
                 actionsView.rightAnchor.constraint(equalTo: contentView.rightAnchor),
                 actionsView.topAnchor.constraint(equalTo: scrollView.topAnchor),
-                actionsView.heightAnchor.constraint(equalToConstant: scrollView.contentSize.height)
+                actionsView.heightAnchor.constraint(equalToConstant: actionsHeight)
             ])
         } else {
-            // Not scrollable
+            // Not scrollable while it fits
             actionsView.addGestureRecognizer(panGestureForMenu)
-            
-            contentView.addSubview(actionsView)
             
             NSLayoutConstraint.activate([
                 actionsView.leftAnchor.constraint(equalTo: contentView.leftAnchor),
                 actionsView.rightAnchor.constraint(equalTo: contentView.rightAnchor),
-                actionsView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 4),
-                actionsView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -4)
+                actionsView.topAnchor.constraint(equalTo: scrollView.topAnchor, constant: 4),
+                actionsView.heightAnchor.constraint(equalToConstant: actionsHeight - 8)
             ])
         }
     }

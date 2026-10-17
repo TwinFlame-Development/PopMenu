@@ -130,6 +130,22 @@ class PopMenuTests: XCTestCase {
         var menuViewFrame: CGRect { return menu.view.convert(menu.view.bounds, to: window) }
     }
 
+    /// The scroll view that holds the actions.
+    func actionsScroll(_ menu: PopMenuViewController) -> UIScrollView? {
+        return menu.contentView.subviews.compactMap { $0 as? UIScrollView }.first
+    }
+
+    /// Every action can be reached: the visible part plus what scrolls covers them all.
+    func assertEveryActionReachable(_ scene: Scene, actions: Int, file: StaticString = #file, line: UInt = #line) {
+        guard let scroll = actionsScroll(scene.menu) else { return XCTFail("the actions are in a scroll view", file: file, line: line) }
+        let needed = scene.menu.appearance.popMenuActionHeight * CGFloat(actions)
+        XCTAssertEqual(scroll.contentSize.height, needed, accuracy: 0.5, file: file, line: line)
+        if needed > scroll.bounds.height + 0.5 {
+            XCTAssertTrue(scroll.isScrollEnabled, "the actions scroll", file: file, line: line)
+        }
+        XCTAssertEqual(scroll.bounds.height, scene.menuFrame.height, accuracy: 0.5, file: file, line: line)
+    }
+
     /// The constraints the menu's own views hold, to see that a size change doesn't add to them.
     func constraintCount(_ menu: PopMenuViewController) -> Int {
         return menu.view.constraints.count + menu.containerView.constraints.count + menu.backgroundView.constraints.count
@@ -197,6 +213,43 @@ class PopMenuTests: XCTestCase {
         assertAtAnchor(scene)
     }
 
+    /// A container shorter than the menu: the menu fits inside it, and every action is reachable by
+    /// scrolling, for a long menu and for a short one.
+    func testAShortContainerKeepsEveryActionReachable() {
+        for actions in [9, 4] {
+            let scene = Scene(size: CGSize(width: 669, height: 160), actions: actions)
+            let frame = scene.menuFrame
+            XCTAssertTrue(scene.menuViewFrame.contains(frame), "\(actions) actions fit: \(frame)")
+            XCTAssertGreaterThan(frame.height, 0)
+            assertEveryActionReachable(scene, actions: actions)
+            XCTAssertTrue(actionsScroll(scene.menu)?.isScrollEnabled == true, "\(actions) actions scroll")
+            // Back to a tall window: a short menu stops scrolling and fits its actions again.
+            scene.resize(to: CGSize(width: 669, height: 951))
+            assertEveryActionReachable(scene, actions: actions)
+            XCTAssertEqual(actionsScroll(scene.menu)?.isScrollEnabled, actions >= 6, "\(actions) actions")
+        }
+    }
+
+    /// The source view moves without the view changing size: the next layout follows it.
+    func testAMovedAnchorIsFollowedWithoutAResize() {
+        let scene = Scene(size: CGSize(width: 669, height: 951))
+        assertAtAnchor(scene)
+        scene.anchor.frame = CGRect(x: 300, y: 140, width: 44, height: 44)
+        scene.menu.view.setNeedsLayout()
+        scene.menu.view.layoutIfNeeded()
+        assertAtAnchor(scene)
+    }
+
+    /// The safe area changes without the view changing size: the next layout keeps the menu inside it.
+    func testASafeAreaChangeIsFollowedWithoutAResize() {
+        let scene = Scene(size: CGSize(width: 669, height: 600), actions: 9)
+        scene.menu.additionalSafeAreaInsets = UIEdgeInsets(top: 0, left: 0, bottom: 380, right: 0)
+        scene.menu.view.setNeedsLayout()
+        scene.menu.view.layoutIfNeeded()
+        XCTAssertLessThanOrEqual(scene.menuFrame.maxY, 600 - 380 + 0.5, "inside the new safe area: \(scene.menuFrame)")
+        assertEveryActionReachable(scene, actions: 9)
+    }
+
     /// With no anchor the menu is centred in its view, before and after a resize.
     func testNoAnchorCentresTheMenu() {
         let scene = Scene(size: CGSize(width: 669, height: 951), anchored: false)
@@ -210,7 +263,7 @@ class PopMenuTests: XCTestCase {
     /// Enough actions to scroll, in a short window: the menu fits inside the view, under its anchor.
     func testAScrollingMenuInAShortWindow() {
         let scene = Scene(size: CGSize(width: 951, height: 669), actions: 9)
-        XCTAssertTrue(scene.menu.contentView.subviews.contains { $0 is UIScrollView }, "scrolls")
+        XCTAssertTrue(actionsScroll(scene.menu)?.isScrollEnabled == true, "scrolls")
         assertAtAnchor(scene)
         scene.resize(to: CGSize(width: 669, height: 400))
         XCTAssertTrue(scene.menuViewFrame.contains(scene.menuFrame), "fits after the resize: \(scene.menuFrame)")
